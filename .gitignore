@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 node_modules/
+.postgres/
+.pg-runtime/
 .venv/
 __pycache__/
 .claude/

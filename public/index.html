@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PostgreSQL 锁诊断台 · 可复现依赖图</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="page-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Reproducible PostgreSQL Lock Bench</p>
+        <h1>数据库锁诊断台</h1>
+        <p class="subtitle">多连接操作三张小型表演示普通阻塞、队列交接、死锁裁决与采样时间边界。</p>
+      </div>
+      <div class="health-card" id="healthCard">
+        <div class="health-dot" id="healthDot"></div>
+        <div>
+          <strong id="healthTitle">正在连接 PostgreSQL…</strong>
+          <span id="healthMeta">检查 /api/health</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="control-deck" aria-label="运行与采样控制">
+      <div class="control-group">
+        <label for="scenarioSelect">复现脚本</label>
+        <select id="scenarioSelect"></select>
+      </div>
+      <div class="control-group">
+        <label for="budgetMs">诊断查询开销上限</label>
+        <div class="inline-input">
+          <input id="budgetMs" type="number" min="2" max="5000" step="10" value="250" />
+          <span>ms statement_timeout</span>
+        </div>
+      </div>
+      <div class="control-group">
+        <label for="intervalMs">自动采样间隔</label>
+        <div class="inline-input">
+          <input id="intervalMs" type="number" min="50" max="10000" step="50" value="500" />
+          <span>ms</span>
+        </div>
+      </div>
+      <div class="button-row">
+        <button class="btn primary" id="advanceBtn">推进下一步</button>
+        <button class="btn" id="sampleBtn">立即原子采样</button>
+        <button class="btn" id="autoBtn">开始自动采样</button>
+        <button class="btn" id="denseTraceBtn">自动播放并密集录制</button>
+        <button class="btn ghost" id="resetBtn">重置运行</button>
+      </div>
+      <p class="control-hint" id="controlHint">步骤会等待语句真正进入锁等待后才返回，保证脚本可复现。</p>
+    </section>
+
+    <main class="layout">
+      <aside class="column left-column">
+        <section class="card script-card">
+          <div class="card-head">
+            <h2>手动推进脚本</h2>
+            <span class="pill" id="runStatusPill">—</span>
+          </div>
+          <p class="scenario-summary" id="scenarioSummary"></p>
+          <ol class="step-list" id="stepList"></ol>
+          <div class="teaching" id="teachingBox"></div>
+        </section>
+
+        <section class="card">
+          <div class="card-head"><h2>解锁后谁先拿到锁</h2></div>
+          <div id="winnerPanel" class="winner-panel"></div>
+        </section>
+      </aside>
+
+      <section class="column center-column">
+        <section class="card graph-card">
+          <div class="card-head graph-head">
+            <div>
+              <h2>等待依赖图</h2>
+              <p class="muted">箭头方向：等待者 → 阻塞者；环只在同一个原子样本中判定。</p>
+            </div>
+            <div class="sample-badges" id="sampleBadges"></div>
+          </div>
+          <div class="atomic-banner" id="atomicBanner"></div>
+          <div class="svg-wrap">
+            <svg id="lockGraph" viewBox="0 0 820 390" role="img" aria-label="PostgreSQL 锁等待依赖图"></svg>
+          </div>
+          <div class="legend" id="graphLegend">
+            <span><i class="swatch session-a"></i>会话（固定身份色 + 文字）</span>
+            <span><i class="line normal"></i>waits-for 边</span>
+            <span><i class="line cycle"></i>同快照死锁环</span>
+            <span><i class="badge-mini blocker">阻</i>阻塞者</span>
+            <span><i class="badge-mini waiter">等</i>等待者</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h2>阻塞者 / 等待者 / 事务时间 / 资源</h2>
+            <button class="btn small" id="refreshStateBtn">刷新状态</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>会话</th><th>PID</th><th>PG 状态</th><th>事务开始</th><th>事务年龄</th>
+                  <th>等待事件</th><th>blocking_pids</th><th>正在等待的资源</th><th>业务提示</th>
+                </tr>
+              </thead>
+              <tbody id="sessionTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card">
+          <details>
+            <summary><h2 class="inline-title">pg_locks 明细（同一快照样例行）</h2></summary>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>会话</th><th>locktype</th><th>mode</th><th>granted</th><th>资源</th><th>fastpath</th></tr></thead>
+                <tbody id="locksTableBody"></tbody>
+              </table>
+            </div>
+          </details>
+        </section>
+      </section>
+
+      <aside class="column right-column">
+        <section class="card sampling-card">
+          <div class="card-head"><h2>采样变稀实验室</h2></div>
+          <p class="muted small">对当前运行已记录的原子样本做确定性降采样。它不是把不同时刻的边拼起来。</p>
+          <label class="slider-label" for="strideRange">每 <strong id="strideValue">1</strong> 个样本取 1 个</label>
+          <input id="strideRange" type="range" min="1" max="12" step="1" value="1" />
+          <label class="slider-label" for="minIntervalSelect">最小采样间隔</label>
+          <select id="minIntervalSelect">
+            <option value="0">不额外按时间过滤</option>
+            <option value="100">≥100ms</option>
+            <option value="250">≥250ms</option>
+            <option value="500">≥500ms</option>
+            <option value="1000">≥1000ms</option>
+            <option value="2000">≥2000ms</option>
+          </select>
+          <div class="analysis-stats" id="analysisStats"></div>
+          <div class="rule-box" id="samplingRule"></div>
+          <div class="judgment-list" id="judgmentList"></div>
+        </section>
+
+        <section class="card stitched-card">
+          <div class="card-head"><h2>禁止当真的跨时刻拼接</h2></div>
+          <div id="stitchedPanel" class="stitched-panel"></div>
+        </section>
+
+        <section class="card events-card">
+          <div class="card-head"><h2>脚本与 PostgreSQL 事件</h2></div>
+          <div class="event-list" id="eventList"></div>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="footer">
+      <span>证据来源：单个诊断事务中的 pg_stat_activity、pg_locks、pg_blocking_pids；statement_timeout 是查询开销的硬上限。</span>
+    </footer>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
